@@ -11,6 +11,9 @@ from pyxlma import coords
 from pyhigh import get_elevation_batch
 from shapely import wkt
 import re
+import dask.array as da
+from dask.distributed import Client
+from functools import partial
 
 EPSILON_0 = 8.8541e-12 # F/m
 
@@ -138,11 +141,18 @@ def charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_
 
     """
     z_min = station_df['z'].min()
-    retrieved_opt = least_squares(delta_E_error,
-                   x0=np.array([initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z]),
-                   bounds=([-np.inf, -np.inf, -np.inf, z_min], [np.inf, np.inf, np.inf, np.inf]),
-                   args=(stroke_obs,
-                         station_df)).x
+    try:
+        retrieved_opt = least_squares(delta_E_error,
+                    x0=np.array([initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z]),
+                    bounds=([-np.inf, -np.inf, -np.inf, z_min], [np.inf, np.inf, np.inf, np.inf]),
+                    args=(stroke_obs,
+                            station_df)).x
+    except ValueError as e:
+                print(f"Initial Guess: q={initial_guess_q}, x={initial_guess_x}, y={initial_guess_y}, z={initial_guess_z}")
+                print(f"Observations: {stroke_obs}")
+                print(f"Error: {e}")
+                return np.array([np.nan, np.nan, np.nan, np.nan])
+    
     return retrieved_opt
 
 def multi_monopole_retrieval(all_monopoles, station_df, initial_guess_q=0):
@@ -170,34 +180,22 @@ def multi_monopole_retrieval(all_monopoles, station_df, initial_guess_q=0):
     retrieved_q : np.ndarray
         A 1D array of shape (N_strokes,) containing the retrieved charges of each stroke.
     """
-    retrieved_x = np.zeros(all_monopoles.shape[0])
-    retrieved_y = np.zeros(all_monopoles.shape[0])
-    retrieved_z = np.zeros(all_monopoles.shape[0])
-    retrieved_q = np.zeros(all_monopoles.shape[0])
-
-    for i in range(all_monopoles.shape[0]):
-        print(f'Retrieving parameters for stroke {i+1}/{all_monopoles.shape[0]}')
-        this_charge_obs = all_monopoles[i, :] # select a set of observations for a single charge
-        station_largest_ob_idx = np.argmax(np.abs(this_charge_obs)) # find the station with the largest observation for this charge, and use that as the initial guess for the retrieval
-        initial_guess = station_df.iloc[station_largest_ob_idx] # get station info for initial guess
-        # retrieve the charge parameters using the charge retrieval function
-        try:
-            this_retrieval = charge_retrieval(initial_guess_q=1,
-                                              initial_guess_x=initial_guess['x'],
-                                              initial_guess_y=initial_guess['y'],
-                                              initial_guess_z=initial_guess['z'] + 3000, # assume flash happens above the station
-                                              stroke_obs=this_charge_obs, station_df=station_df)
-        except ValueError as e:
-            print(f"Failed to retrieve parameters for stroke {i}")
-            print(f"Initial Guess: q={initial_guess_q}, x={initial_guess['x']}, y={initial_guess['y']}, z={initial_guess['z']}")
-            print(f"Observations: {this_charge_obs}")
-            print(f"Error: {e}")
-            raise e
-        # store the result of the retrieval in the appropriate arrays
-        retrieved_x[i] = this_retrieval[1]
-        retrieved_y[i] = this_retrieval[2]
-        retrieved_z[i] = this_retrieval[3]
-        retrieved_q[i] = this_retrieval[0]
+    chunk_size = 50
+    this_charge_obs = da.from_array(all_monopoles, chunks=(chunk_size, -1)) # observations for all charges, shape (N_strokes, N_stations)
+    station_largest_ob_idx = np.argmax(np.abs(all_monopoles), axis=1)
+    initial_guess = da.from_array(station_df[['x', 'y', 'z']].to_numpy()[station_largest_ob_idx], chunks=(chunk_size, -1)) # station x, y, z for each initial guess, shape (N_strokes, 3)
+    # retrieve the charge parameters for every stroke in parallel using the charge retrieval function
+    all_retrievals = da.apply_gufunc(partial(charge_retrieval, station_df=station_df), '(),(),(),(),(n)->(p)',
+                                        1, # initial_guess_q
+                                        initial_guess[:, 0], # initial_guess_x
+                                        initial_guess[:, 1], # initial_guess_y
+                                        initial_guess[:, 2] + 1000, # initial_guess_z, 1km above station location
+                                        this_charge_obs, # stroke_obs
+                                        vectorize=True, output_dtypes=float, output_sizes={'p': 4}).persist()
+    retrieved_x = all_retrievals[:, 1]
+    retrieved_y = all_retrievals[:, 2]
+    retrieved_z = all_retrievals[:, 3]
+    retrieved_q = all_retrievals[:, 0]
     return retrieved_x, retrieved_y, retrieved_z, retrieved_q
 
 
@@ -228,27 +226,20 @@ def add_error_to_monopoles(all_monopoles, error_scale=150):
     return all_monopoles_with_error
 
 
-if __name__ == "__main__":
-    ## PARAMETERS:
-    L_x, n_x = 2*15, 31
-    L_y, n_y = 2*15, 31
-    L_z, n_z = 10, 10
-    Q_coloumbs = 3
-    error_scale = 150 # V/m
-    # Step 0: read in station dataframe
-    rows = []
-    with open('./stations.csv') as f:
-        next(f)  # skip header line
-        for line in f:
-            line = line.rstrip('\n')
-            # WKT is always the first quoted field — capture it and everything after the comma
-            m = re.match(r'^"([^"]+)",(.*)', line)
-            if m:
-                rows.append({'WKT': m.group(1), 'name': m.group(2)})
+def station_geometry_to_x_y_z(station_df):
+    """
+    Convert station latitude, longitude, and altitude to x, y, z coordinates in a tangent plane Cartesian system.
 
-    station_df = pd.DataFrame(rows)
-    station_df[['name', 'description']] = station_df['name'].str.split(',', n=1, expand=True)
-    station_df = station_df.drop(columns=['description'])
+    Parameters
+    ----------
+    station_df : pd.DataFrame
+        A DataFrame containing the station information, including 'lat', 'lon', and 'alt' columns for the station coordinates.
+
+    Returns
+    -------
+    station_df : pd.DataFrame
+        The input DataFrame with additional 'x', 'y', and 'z' columns for the station coordinates in the tangent plane Cartesian system.
+    """
     station_df['geometry'] = station_df['WKT'].apply(wkt.loads)
     station_df['lon'] = station_df['geometry'].apply(lambda x: x.x)
     station_df['lat'] = station_df['geometry'].apply(lambda x: x.y)
@@ -263,26 +254,82 @@ if __name__ == "__main__":
     station_df['x'] = station_x
     station_df['y'] = station_y
     station_df['z'] = station_z
+    return station_df
+
+
+def read_google_maps_df(path):
+    """
+    Read a CSV file containing station information from Google Maps and return a DataFrame.
+
+    Parameters
+    ----------
+    path : str
+        The path to the CSV file containing the station information.
+
+    Returns
+    -------
+    station_df : pd.DataFrame
+        A DataFrame containing the station information, including 'WKT', 'name', 'lat', 'lon', and 'alt' columns.
+    """
+    rows = []
+    with open(path) as f:
+        next(f)  # skip header line
+        for line in f:
+            line = line.rstrip('\n')
+            # WKT is always the first quoted field — capture it and everything after the comma
+            m = re.match(r'^"([^"]+)",(.*)', line)
+            if m:
+                rows.append({'WKT': m.group(1), 'name': m.group(2)})
+
+    station_df = pd.DataFrame(rows)
+    station_df[['name', 'description']] = station_df['name'].str.split(',', n=1, expand=True)
+    station_df = station_df.drop(columns=['description'])
+    return station_geometry_to_x_y_z(station_df)
+
+if __name__ == "__main__":
+    cluster = Client(processes=True, n_workers=16, threads_per_worker=1, memory_limit='2GB')
+    ## PARAMETERS:
+    L_x, n_x = 2*15, 31
+    L_y, n_y = 2*15, 31
+    L_z, n_z = 10, 10
+    Q_coloumbs = 3
+    error_scale = 150 # V/m
+    # Step 0: read in station dataframe
+    # station_df = read_google_maps_df('station_locations.csv')
+    # station_df = station_geometry_to_x_y_z(station_df)
+    station_df = pd.read_csv('station_locations.csv')
     # step 1 -- create grids of X, Y, Z, Q in shape (Nx, Ny, Nz)
     x_vals = np.linspace(-L_x/2, L_x/2, n_x)*1e3
     y_vals = np.linspace(-L_y/2, L_y/2, n_y)*1e3
     z_vals = np.linspace(0, L_z, n_z)*1e3
     x_grid, y_grid, z_grid = np.meshgrid(x_vals, y_vals, z_vals)
+    q_grid = np.full_like(x_grid, Q_coloumbs)
 
     x_grid_flat, y_grid_flat, z_grid_flat = x_grid.flatten(), y_grid.flatten(), z_grid.flatten()
-    q = np.full_like(x_grid, Q_coloumbs).flatten()
+    q_grid_flat = q_grid.flatten()
     # step 2 -- calculate "perfect" delta E at station locations shape Nx*Ny*Nz, N_stations
-    delta_e_ideal = monopole_E_change(x_grid_flat, y_grid_flat, z_grid_flat, q, station_df['x'].values, station_df['y'].values, station_df['z'].values)
+    delta_e_ideal = monopole_E_change(x_grid_flat, y_grid_flat, z_grid_flat, q_grid_flat, station_df['x'].values, station_df['y'].values, station_df['z'].values)
     # step 3 -- add gaussian noise to the delta E values to simulate instrument error
     delta_e_with_error = add_error_to_monopoles(delta_e_ideal, error_scale=error_scale)
-    print(delta_e_with_error.shape)
     # step 4 -- use noisy delta E values to retrieve x, y, z, and q of shape (Nx, Ny, Nz)
     retrieved_x, retrieved_y, retrieved_z, retrieved_q = multi_monopole_retrieval(delta_e_with_error, station_df, initial_guess_q=0)
+    # step 5 -- use retrieved grid to simulate delta E at the station locations
+    delta_e_retrieved = monopole_E_change(retrieved_x.flatten(), retrieved_y.flatten(), retrieved_z.flatten(), retrieved_q.flatten(), station_df['x'].values, station_df['y'].values, station_df['z'].values)
+    # step 6 -- calculate and fit a chi2 distribution
+    print(delta_e_with_error.shape, delta_e_retrieved.shape)
+    err_dist_normalized = (delta_e_with_error - delta_e_retrieved) / error_scale
+    reduced_chi2_observed = np.sum(err_dist_normalized**2, axis=1)
+    reduced_chi2_fit = chi2.fit(reduced_chi2_observed)
+    print(f'Fitted Chi2 parameters: DoF={reduced_chi2_fit[0]:.2f}, loc={reduced_chi2_fit[1]:.2f}, scale={reduced_chi2_fit[2]:.2f}')
+    expected_chi2 = chi2.pdf(np.arange(0, np.max(reduced_chi2_observed), 0.1), df=4, loc=0, scale=error_scale)
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111)
+    ax.hist(reduced_chi2_observed, bins=50, density=True, alpha=0.5, label='Observed Reduced Chi2')
+    ax.plot(np.arange(0, np.max(reduced_chi2_observed), 0.1), expected_chi2, label='Expected Chi2 PDF', color='red')
+    ax.set_xlabel('Error Distribution')
+    ax.set_ylabel('Probability Density')
+    ax.legend()
+    ax.set_title('Chi2 Distribution of Retrieval Errors')
+    fig.savefig('chi2_distribution.png', dpi=300)
+    cluster.close()
 
-
-    # store all actual and retrieved values in dictionaries
-    retrieved_x = retrieved_x.reshape(x_grid.shape)
-    retrieved_y = retrieved_y.reshape(x_grid.shape)
-    retrieved_z = retrieved_z.reshape(x_grid.shape)
-    retrieved_q = retrieved_q.reshape(x_grid.shape)
-    retrieved_all = np.array([retrieved_x, retrieved_y, retrieved_z, retrieved_q])
