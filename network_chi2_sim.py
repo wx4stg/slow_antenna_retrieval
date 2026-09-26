@@ -202,33 +202,6 @@ def multi_monopole_retrieval(all_monopoles, station_df, initial_guess_q=1):
     return retrieved_x, retrieved_y, retrieved_z, retrieved_q
 
 
-def add_error_to_monopoles(all_monopoles, error_scale=150):
-    """
-    Retrieve the location and charge removed by multiple monopole discharge strokes.
-    Adds normally distributed random noise to the observations for each station before performing the retrieval, to simulate realistic instrument error.
-
-    Parameters
-    ----------
-    all_monopoles : np.ndarray
-        A 2D array of shape (N_strokes, N_stations) containing the observed electric field changes at each station for each stroke.
-    error_scale : float, optional
-        The standard deviation of the normally distributed error to be added to the observations for each station. Default is 150 (V/m).
-
-    Returns
-    -------
-    ret_err : np.ndarray
-        A 4D array of shape (4, N_x, N_y, N_z) containing the retrieved x, y, z, and q values for each point in the grid after
-        adding error to the observations and performing the retrieval.
-    """
-    all_monopoles_with_error = all_monopoles.copy()
-    for station_idx in range(all_monopoles.shape[1]):
-        this_station_error = np.random.normal(loc=0, scale=error_scale, size=all_monopoles.shape[0]) # add some normally distributed error to the observations for this station
-        all_monopoles_with_error[:, station_idx] += this_station_error
-    # ret_x_err, ret_y_err, ret_z_err, ret_q_err = multi_monopole_retrieval(all_monopoles_with_error, station_df, initial_guess_q=3)
-    # ret_err = np.array([ret_x_err.reshape(x_grid.shape), ret_y_err.reshape(x_grid.shape), ret_z_err.reshape(x_grid.shape), ret_q_err.reshape(x_grid.shape)])
-    return all_monopoles_with_error
-
-
 def station_geometry_to_x_y_z(station_df):
     """
     Convert station latitude, longitude, and altitude to x, y, z coordinates in a tangent plane Cartesian system.
@@ -314,7 +287,7 @@ if __name__ == "__main__":
     # step 2 -- calculate "perfect" delta E at station locations shape Nx*Ny*Nz, N_stations
     delta_e_ideal = monopole_E_change(x_grid_flat, y_grid_flat, z_grid_flat, q_grid_flat, station_df['x'].values, station_df['y'].values, station_df['z'].values)
     # step 3 -- add gaussian noise to the delta E values to simulate instrument error
-    delta_e_with_error = add_error_to_monopoles(delta_e_ideal, error_scale=error_scale)
+    delta_e_with_error = delta_e_ideal + np.random.normal(loc=0, scale=error_scale, size=delta_e_ideal.shape)
     # step 4 -- use noisy delta E values to retrieve x, y, z, and q of shape (Nx, Ny, Nz)
     retrieved_x, retrieved_y, retrieved_z, retrieved_q = multi_monopole_retrieval(delta_e_with_error, station_df, initial_guess_q=0)
     # step 5 -- use retrieved grid to simulate delta E at the station locations
