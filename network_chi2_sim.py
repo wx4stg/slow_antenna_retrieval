@@ -53,6 +53,7 @@ def monopole_E_change(x, y, z, q, xi, yi, zi):
     delta_E = k_const * (2*q*dz / (np.linalg.norm(r, axis=0)**3) )
     return delta_E # V/m
 
+
 def dipole_E_change(x, y, z, q, xi, yi, zi, dr):
     """
     Calculate the change in electric field due to a dipole charge at a given position.
@@ -120,6 +121,7 @@ def delta_E_error(params, observed_E, station_info):
     predicted_E = monopole_E_change(x, y, z, q, station_info['x'], station_info['y'], station_info['z'])
     return observed_E - np.reshape(predicted_E, observed_E.shape)
 
+
 def charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_df):
     """
     Retrieve the location and charge removed by a monopole discharge stroke.
@@ -155,7 +157,8 @@ def charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_
     
     return retrieved_opt
 
-def multi_monopole_retrieval(all_monopoles, station_df, initial_guess_q=0):
+
+def multi_monopole_retrieval(all_monopoles, station_df, initial_guess_q=1):
     """
     Retrieve the location and charge removed by multiple monopole discharge strokes.
 
@@ -186,7 +189,7 @@ def multi_monopole_retrieval(all_monopoles, station_df, initial_guess_q=0):
     initial_guess = da.from_array(station_df[['x', 'y', 'z']].to_numpy()[station_largest_ob_idx], chunks=(chunk_size, -1)) # station x, y, z for each initial guess, shape (N_strokes, 3)
     # retrieve the charge parameters for every stroke in parallel using the charge retrieval function
     all_retrievals = da.apply_gufunc(partial(charge_retrieval, station_df=station_df), '(),(),(),(),(n)->(p)',
-                                        1, # initial_guess_q
+                                        initial_guess_q, # initial_guess_q
                                         initial_guess[:, 0], # initial_guess_x
                                         initial_guess[:, 1], # initial_guess_y
                                         initial_guess[:, 2] + 1000, # initial_guess_z, 1km above station location
@@ -286,6 +289,7 @@ def read_google_maps_df(path):
     station_df = station_df.drop(columns=['description'])
     return station_geometry_to_x_y_z(station_df)
 
+
 if __name__ == "__main__":
     cluster = Client(processes=True, n_workers=16, threads_per_worker=1, memory_limit='2GB')
     ## PARAMETERS:
@@ -316,16 +320,17 @@ if __name__ == "__main__":
     # step 5 -- use retrieved grid to simulate delta E at the station locations
     delta_e_retrieved = monopole_E_change(retrieved_x.flatten(), retrieved_y.flatten(), retrieved_z.flatten(), retrieved_q.flatten(), station_df['x'].values, station_df['y'].values, station_df['z'].values)
     # step 6 -- calculate and fit a chi2 distribution
-    print(delta_e_with_error.shape, delta_e_retrieved.shape)
-    err_dist_normalized = (delta_e_with_error - delta_e_retrieved) / error_scale
+    err_dist_normalized = (delta_e_retrieved - delta_e_ideal) / error_scale
     reduced_chi2_observed = np.sum(err_dist_normalized**2, axis=1)
     reduced_chi2_fit = chi2.fit(reduced_chi2_observed)
     print(f'Fitted Chi2 parameters: DoF={reduced_chi2_fit[0]:.2f}, loc={reduced_chi2_fit[1]:.2f}, scale={reduced_chi2_fit[2]:.2f}')
-    expected_chi2 = chi2.pdf(np.arange(0, np.max(reduced_chi2_observed), 0.1), df=4, loc=0, scale=error_scale)
+    expected_chi2 = chi2.pdf(np.arange(0, np.max(reduced_chi2_observed), 0.1), df=4, loc=0, scale=1)
+    fitted_chi2 = chi2.pdf(np.arange(0, np.max(reduced_chi2_observed), 0.1), df=reduced_chi2_fit[0], loc=reduced_chi2_fit[1], scale=reduced_chi2_fit[2])
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111)
     ax.hist(reduced_chi2_observed, bins=50, density=True, alpha=0.5, label='Observed Reduced Chi2')
-    ax.plot(np.arange(0, np.max(reduced_chi2_observed), 0.1), expected_chi2, label='Expected Chi2 PDF', color='red')
+    ax.plot(np.arange(0, np.max(reduced_chi2_observed), 0.1), expected_chi2, label='Expected Chi2 PDF', color='tab:red')
+    ax.plot(np.arange(0, np.max(reduced_chi2_observed), 0.1), fitted_chi2, label='Fitted Chi2 PDF', color='tab:green')
     ax.set_xlabel('Error Distribution')
     ax.set_ylabel('Probability Density')
     ax.legend()
