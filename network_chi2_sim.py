@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# Support functions for HW4 and HW5
+# Simulate a network of slow antenna stations and get location-dependent error distribution
 # Created 29 April 2026 by Sam Gardner <samuel.gardner@ttu.edu>
 
+
+import argparse
+from sa_retrieve import monopole_E_change, multi_monopole_retrieval_dask
 import numpy as np
-from scipy.optimize import least_squares
 from matplotlib import pyplot as plt
 import pandas as pd
 from scipy.stats import chi2
@@ -11,195 +13,6 @@ from pyxlma import coords
 from pyhigh import get_elevation_batch
 from shapely import wkt
 import re
-import dask.array as da
-from dask.distributed import Client
-from functools import partial
-
-EPSILON_0 = 8.8541e-12 # F/m
-
-
-def monopole_E_change(x, y, z, q, xi, yi, zi):
-    """
-    Calculate the change in electric field due to a monopole charge at a given position.
-
-    Parameters
-    ----------
-    x, y, z, q : array-like
-        The x, y, z coordinates of the charge (stroke) positions. Shape should be (N_strokes,).
-    xi, yi, zi : array-like
-        The x, y, z coordinates of the station positions. Shape should be (N_stations,).
-
-    Returns
-    -------
-    delta_E : ndarray
-        The change in electric field at each station due to each charge. Shape will be (N_strokes, N_stations).
-    """
-    # reshape so that all 'stroke' parameters are on axis 0
-    x = np.array(x).reshape(-1, 1)
-    y = np.array(y).reshape(-1, 1)
-    z = np.array(z).reshape(-1, 1)
-    q = np.array(q).reshape(-1, 1)
-    # reshape so that all 'station' parameters are on axis 1
-    xi = np.array(xi).reshape(1, -1)
-    yi = np.array(yi).reshape(1, -1)
-    zi = np.array(zi).reshape(1, -1)
-    # compute r vector from stroke to station
-    dx = x - xi
-    dy = y - yi
-    dz = z - zi
-    r = np.array((dx, dy, dz))
-    # calculate E-field change using monopole formula, \frac{1}{4\pi\epsilon_0} \frac{2qz}{r^3}
-    k_const = 1/(4*np.pi*EPSILON_0)
-    delta_E = k_const * (2*q*dz / (np.linalg.norm(r, axis=0)**3) )
-    return delta_E # V/m
-
-
-def dipole_E_change(x, y, z, q, xi, yi, zi, dr):
-    """
-    Calculate the change in electric field due to a dipole charge at a given position.
-
-    Parameters
-    ----------
-    x, y, z, q : array-like
-        The x, y, z coordinates of the charge (stroke) positions. Shape should be (N_strokes,).
-    xi, yi, zi : array-like
-        The x, y, z coordinates of the station positions. Shape should be (N_stations,).
-    dr : array-like
-        The dipole moment vector components (dr_x, dr_y, dr_z). Shape should be (3, N_strokes).
-
-    Returns
-    -------
-    delta_E : ndarray
-        The change in electric field at each station due to each charge. Shape will be (N_strokes, N_stations).
-    """
-    # reshape so that all 'stroke' parameters are on axis 0
-    x = np.array(x).reshape(-1, 1)
-    y = np.array(y).reshape(-1, 1)
-    z = np.array(z).reshape(-1, 1)
-    q = np.array(q).reshape(-1, 1)
-    drx = dr[0, :].reshape(-1, 1)
-    dry = dr[1, :].reshape(-1, 1)
-    drz = dr[2, :].reshape(-1, 1)
-    # reshape so that all 'station' parameters are on axis 1
-    xi = np.array(xi).reshape(1, -1)
-    yi = np.array(yi).reshape(1, -1)
-    zi = np.array(zi).reshape(1, -1)
-    # compute r vector from stroke to station
-    dx = x - xi
-    dy = y - yi
-    dz = z - np.zeros_like(xi)
-    # compute charge moment vector, p = dr * q
-    p = np.array((drx, dry, drz)) * q
-    r = np.array((dx, dy, dz))
-    r_mag = np.linalg.norm(r, axis=0)
-    # dot product of r and p, r_dot_p = r_x*p_x + r_y*p_y + r_z*p_z
-    r_dot_p = np.sum(r*p, axis=0)
-    # calculate E-field change using dipole formula, \frac{1}{4\pi\epsilon_0} (\frac{2p_z}{r^3} - \frac{6z}{r^5} (r \cdot p))
-    k_const = 1/(4*np.pi*EPSILON_0)
-    delta_E = k_const * ((2*p[2, :]/(r_mag**3)) - (6*dz)/(r_mag**5) * r_dot_p)
-    return delta_E # V/m
-
-def delta_E_error(params, observed_E, station_info):
-    """
-    Calculate the error between the observed electric field changes and the predicted electric field changes for a given set of monopole parameters.
-
-    Parameters
-    ----------
-    params : array-like
-        An array containing the monopole parameters (q, x, y, z) to be optimized. Shape should be (4,).
-    observed_E : array-like
-        A 1D array of shape (N_stations,) containing the observed electric field changes at each station for the stroke.
-    station_info : pd.DataFrame
-        A DataFrame containing the station information, including 'x' and 'y' and 'z' columns for the station coordinates.
-
-    Returns
-    -------
-    error : ndarray
-        A 1D array of shape (N_stations,) containing the error between the observed electric field changes and the predicted electric field changes for the given monopole parameters.
-    """
-    q, x, y, z = params
-    predicted_E = monopole_E_change(x, y, z, q, station_info['x'], station_info['y'], station_info['z'])
-    return observed_E - np.reshape(predicted_E, observed_E.shape)
-
-
-def charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_df):
-    """
-    Retrieve the location and charge removed by a monopole discharge stroke.
-
-    Parameters
-    ----------
-    initial_guess_q : float
-        An initial guess for the charge of the stroke.
-    initial_guess_x : float
-        An initial guess for the x coordinate of the stroke.
-    initial_guess_y : float
-        An initial guess for the y coordinate of the stroke.
-    initial_guess_z : float
-        An initial guess for the z coordinate of the stroke.
-    stroke_obs : np.ndarray
-        A 1D array of shape (N_stations,) containing the observed electric field changes at each station for the stroke.
-    station_df : pd.DataFrame
-        A DataFrame containing the station information, including 'x' and 'y' and 'z' columns for the station coordinates.
-
-    """
-    z_min = station_df['z'].min()
-    try:
-        retrieved_opt = least_squares(delta_E_error,
-                    x0=np.array([initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z]),
-                    bounds=([-np.inf, -np.inf, -np.inf, z_min], [np.inf, np.inf, np.inf, np.inf]),
-                    args=(stroke_obs,
-                            station_df)).x
-    except ValueError as e:
-                print(f"Initial Guess: q={initial_guess_q}, x={initial_guess_x}, y={initial_guess_y}, z={initial_guess_z}")
-                print(f"Observations: {stroke_obs}")
-                print(f"Error: {e}")
-                return np.array([np.nan, np.nan, np.nan, np.nan])
-    
-    return retrieved_opt
-
-
-def multi_monopole_retrieval(all_monopoles, station_df, initial_guess_q=1):
-    """
-    Retrieve the location and charge removed by multiple monopole discharge strokes.
-
-    
-    Parameters
-    ----------
-    all_monopoles : np.ndarray
-        A 2D array of shape (N_strokes, N_stations) containing the observed electric field changes at each station for each stroke.
-    station_df : pd.DataFrame
-        A DataFrame containing the station information, including 'x' and 'y' and 'z' columns for the station coordinates.
-    initial_guess_q : float, optional
-        An optional initial guess for the charge of each stroke. Default is 0.
-
-    Returns
-    -------
-    retrieved_x : np.ndarray
-        A 1D array of shape (N_strokes,) containing the retrieved x coordinates of each stroke.
-    retrieved_y : np.ndarray
-        A 1D array of shape (N_strokes,) containing the retrieved y coordinates of each stroke.
-    retrieved_z : np.ndarray
-        A 1D array of shape (N_strokes,) containing the retrieved z coordinates of each stroke.
-    retrieved_q : np.ndarray
-        A 1D array of shape (N_strokes,) containing the retrieved charges of each stroke.
-    """
-    chunk_size = 50
-    this_charge_obs = da.from_array(all_monopoles, chunks=(chunk_size, -1)) # observations for all charges, shape (N_strokes, N_stations)
-    station_largest_ob_idx = np.argmax(np.abs(all_monopoles), axis=1)
-    initial_guess = da.from_array(station_df[['x', 'y', 'z']].to_numpy()[station_largest_ob_idx], chunks=(chunk_size, -1)) # station x, y, z for each initial guess, shape (N_strokes, 3)
-    # retrieve the charge parameters for every stroke in parallel using the charge retrieval function
-    all_retrievals = da.apply_gufunc(partial(charge_retrieval, station_df=station_df), '(),(),(),(),(n)->(p)',
-                                        initial_guess_q, # initial_guess_q
-                                        initial_guess[:, 0], # initial_guess_x
-                                        initial_guess[:, 1], # initial_guess_y
-                                        initial_guess[:, 2] + 1000, # initial_guess_z, 1km above station location
-                                        this_charge_obs, # stroke_obs
-                                        vectorize=True, output_dtypes=float, output_sizes={'p': 4}).persist()
-    retrieved_x = all_retrievals[:, 1]
-    retrieved_y = all_retrievals[:, 2]
-    retrieved_z = all_retrievals[:, 3]
-    retrieved_q = all_retrievals[:, 0]
-    return retrieved_x, retrieved_y, retrieved_z, retrieved_q
 
 
 def station_geometry_to_x_y_z(station_df):
@@ -264,17 +77,28 @@ def read_google_maps_df(path):
 
 
 if __name__ == "__main__":
-    cluster = Client(processes=True, n_workers=16, threads_per_worker=1, memory_limit='2GB')
-    ## PARAMETERS:
-    L_x, n_x = 2*15, 31
-    L_y, n_y = 2*15, 31
-    L_z, n_z = 10, 10
-    Q_coloumbs = 3
-    error_scale = 150 # V/m
+    parser = argparse.ArgumentParser(description='Simulate a network of slow antenna stations and get location-dependent error distribution.')
+    parser.add_argument('--station_csv', type=str, default='station_locations.csv', help='Path to the CSV file containing station information.')
+    parser.add_argument('--L_x', type=float, default=30, help='Length of the grid in the x direction (km).')
+    parser.add_argument('--L_y', type=float, default=30, help='Length of the grid in the y direction (km).')
+    parser.add_argument('--L_z', type=float, default=10, help='Length of the grid in the z direction (km).')
+    parser.add_argument('--n_x', type=int, default=31, help='Number of grid points in the x direction.')
+    parser.add_argument('--n_y', type=int, default=31, help='Number of grid points in the y direction.')
+    parser.add_argument('--n_z', type=int, default=10, help='Number of grid points in the z direction.')
+    parser.add_argument('-q', '--Q_coloumbs', type=float, default=3, help='Charge of the monopole in coloumbs.')
+    parser.add_argument('--error_scale', type=float, default=150, help='Scale of the Gaussian noise to be added to the delta E values (V/m).')
+    parser.add_argument('--chunk_size', type=int, default=50, help='Chunk size for Dask array processing.')
+    args = parser.parse_args()
+    L_x, n_x = args.L_x, args.n_x
+    L_y, n_y = args.L_y, args.n_y
+    L_z, n_z = args.L_z, args.n_z
+    Q_coloumbs = args.Q_coloumbs
+    error_scale = args.error_scale # V/m
+    chunk_size = args.chunk_size
     # Step 0: read in station dataframe
     # station_df = read_google_maps_df('station_locations.csv')
     # station_df = station_geometry_to_x_y_z(station_df)
-    station_df = pd.read_csv('station_locations.csv')
+    station_df = pd.read_csv(args.station_csv)
     # step 1 -- create grids of X, Y, Z, Q in shape (Nx, Ny, Nz)
     x_vals = np.linspace(-L_x/2, L_x/2, n_x)*1e3
     y_vals = np.linspace(-L_y/2, L_y/2, n_y)*1e3
@@ -289,7 +113,7 @@ if __name__ == "__main__":
     # step 3 -- add gaussian noise to the delta E values to simulate instrument error
     delta_e_with_error = delta_e_ideal + np.random.normal(loc=0, scale=error_scale, size=delta_e_ideal.shape)
     # step 4 -- use noisy delta E values to retrieve x, y, z, and q of shape (Nx, Ny, Nz)
-    retrieved_x, retrieved_y, retrieved_z, retrieved_q = multi_monopole_retrieval(delta_e_with_error, station_df, initial_guess_q=0)
+    retrieved_x, retrieved_y, retrieved_z, retrieved_q = multi_monopole_retrieval_dask(delta_e_with_error, station_df, initial_guess_q=0, chunk_size=chunk_size)
     # step 5 -- use retrieved grid to simulate delta E at the station locations
     delta_e_retrieved = monopole_E_change(retrieved_x.flatten(), retrieved_y.flatten(), retrieved_z.flatten(), retrieved_q.flatten(), station_df['x'].values, station_df['y'].values, station_df['z'].values)
     # step 6 -- calculate and fit a chi2 distribution
@@ -309,5 +133,4 @@ if __name__ == "__main__":
     ax.legend()
     ax.set_title('Chi2 Distribution of Retrieval Errors')
     fig.savefig('chi2_distribution.png', dpi=300)
-    cluster.close()
 
