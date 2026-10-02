@@ -5,7 +5,6 @@
 
 import numpy as np
 from scipy.optimize import least_squares
-from dask import array as da
 from functools import partial
 
 
@@ -117,7 +116,7 @@ def monopole_delta_E_error(params, observed_E, station_info):
     return observed_E - np.reshape(predicted_E, observed_E.shape)
 
 
-def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_df):
+def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_df, constrain_xyz=False):
     """
     Retrieve the location and charge removed by a monopole discharge stroke.
 
@@ -135,15 +134,20 @@ def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y,
         A 1D array of shape (N_stations,) containing the observed electric field changes at each station for the stroke.
     station_df : pd.DataFrame
         A DataFrame containing the station information, including 'x' and 'y' and 'z' columns for the station coordinates.
-
+    constrain_xyz : bool, optional
+        If True, require that the solution use the provided initial guesses for x, y, and z (solving only for q). Default is False.
     """
     z_min = station_df['z'].min()
     try:
-        retrieved_opt = least_squares(monopole_delta_E_error,
-                    x0=np.array([initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z]),
-                    bounds=([-np.inf, -np.inf, -np.inf, z_min], [np.inf, np.inf, np.inf, np.inf]),
-                    args=(stroke_obs,
-                            station_df)).x
+        if constrain_xyz:
+            prefilled = partial(monopole_delta_E_error, x=initial_guess_x, y=initial_guess_y, z=initial_guess_z)
+            retrieved_opt = least_squares(prefilled, x0=np.array([initial_guess_q]), bounds=([-np.inf], [np.inf]), args=(stroke_obs, station_df)).x
+        else:
+            retrieved_opt = least_squares(monopole_delta_E_error,
+                        x0=np.array([initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z]),
+                        bounds=([-np.inf, -np.inf, -np.inf, z_min], [np.inf, np.inf, np.inf, np.inf]),
+                        args=(stroke_obs,
+                        station_df)).x
     except ValueError as e:
                 print(f"Initial Guess: q={initial_guess_q}, x={initial_guess_x}, y={initial_guess_y}, z={initial_guess_z}")
                 print(f"Observations: {stroke_obs}")
@@ -177,6 +181,7 @@ def multi_monopole_retrieval_dask(all_monopoles, station_df, initial_guess_q=1, 
     retrieved_q : np.ndarray
         A 1D array of shape (N_strokes,) containing the retrieved charges of each stroke.
     """
+    import dask.array as da
     this_charge_obs = da.from_array(all_monopoles, chunks=(chunk_size, -1)) # observations for all charges, shape (N_strokes, N_stations)
     station_largest_ob_idx = np.argmax(np.abs(all_monopoles), axis=1)
     initial_guess = da.from_array(station_df[['x', 'y', 'z']].to_numpy()[station_largest_ob_idx], chunks=(chunk_size, -1)) # station x, y, z for each initial guess, shape (N_strokes, 3)
