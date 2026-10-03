@@ -93,7 +93,7 @@ def dipole_E_change(x, y, z, q, xi, yi, zi, dr):
     return delta_E # V/m
 
 
-def monopole_delta_E_error(params, observed_E, station_info):
+def monopole_delta_E_error(params, observed_E, station_info, restrict_x=None, restrict_y=None, restrict_z=None):
     """
     Calculate the error between the observed electric field changes and the predicted electric field changes for a given set of monopole parameters.
 
@@ -111,7 +111,19 @@ def monopole_delta_E_error(params, observed_E, station_info):
     error : ndarray
         A 1D array of shape (N_stations,) containing the error between the observed electric field changes and the predicted electric field changes for the given monopole parameters.
     """
-    q, x, y, z = params
+    if restrict_x is not None:
+        x = restrict_x
+    else:
+        x = params[1]
+    if restrict_y is not None:
+        y = restrict_y
+    else:
+        y = params[2]
+    if restrict_z is not None:
+        z = restrict_z
+    else:
+        z = params[3]
+    q = params[0]
     predicted_E = monopole_E_change(x, y, z, q, station_info['x'], station_info['y'], station_info['z'])
     return observed_E - np.reshape(predicted_E, observed_E.shape)
 
@@ -140,8 +152,9 @@ def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y,
     z_min = station_df['z'].min()
     try:
         if constrain_xyz:
-            prefilled = partial(monopole_delta_E_error, x=initial_guess_x, y=initial_guess_y, z=initial_guess_z)
+            prefilled = partial(monopole_delta_E_error, restrict_x=initial_guess_x, restrict_y=initial_guess_y, restrict_z=initial_guess_z)
             retrieved_opt = least_squares(prefilled, x0=np.array([initial_guess_q]), bounds=([-np.inf], [np.inf]), args=(stroke_obs, station_df)).x
+            retrieved_opt = np.array([retrieved_opt[0], initial_guess_x, initial_guess_y, initial_guess_z])
         else:
             retrieved_opt = least_squares(monopole_delta_E_error,
                         x0=np.array([initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z]),
