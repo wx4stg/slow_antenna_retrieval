@@ -98,7 +98,7 @@ if __name__ == "__main__":
         # step 3 -- add gaussian noise to the delta E values to simulate instrument error
         delta_e_with_error = delta_e_ideal + np.random.normal(loc=0, scale=error_scale, size=delta_e_ideal.shape)
         # step 4 -- use noisy delta E values to retrieve x, y, z, and q of shape (Nx, Ny, Nz)
-        retrieved_x, retrieved_y, retrieved_z, retrieved_q = multi_monopole_retrieval_dask(delta_e_with_error, station_df, initial_guess_q=0, chunk_size=chunk_size)
+        retrieved_x, retrieved_y, retrieved_z, retrieved_q = multi_monopole_retrieval_dask(delta_e_with_error, station_df, initial_guess_q=0.1, chunk_size=chunk_size)
         # step 5 -- use retrieved grid to simulate delta E at the station locations
         delta_e_retrieved = monopole_E_change(retrieved_x.flatten(), retrieved_y.flatten(), retrieved_z.flatten(), retrieved_q.flatten(), station_df['x'].values, station_df['y'].values, station_df['z'].values)
         # calculate X, Y, Z, and Q errors:
@@ -135,13 +135,13 @@ if __name__ == "__main__":
     delta_e_ideal_extended = np.tile(delta_e_ideal.reshape(*x_grid.shape, station_df.shape[0]), (num_sims, 1, 1, 1, 1))
     err_dist_normalized = (all_ret_delta_e - delta_e_ideal_extended) / error_scale
     reduced_chi2_observed = np.sum(err_dist_normalized**2, axis=-1).flatten()
-    reduced_chi2_fit = chi2.fit(reduced_chi2_observed)
+    reduced_chi2_fit = chi2.fit(reduced_chi2_observed, floc=0, fscale=1)
     print(f'Fitted Chi2 parameters: DoF={reduced_chi2_fit[0]:.2f}, loc={reduced_chi2_fit[1]:.2f}, scale={reduced_chi2_fit[2]:.2f}')
     expected_chi2 = chi2.pdf(np.arange(0, np.max(reduced_chi2_observed), 0.1), df=4, loc=0, scale=1)
     fitted_chi2 = chi2.pdf(np.arange(0, np.max(reduced_chi2_observed), 0.1), df=reduced_chi2_fit[0], loc=reduced_chi2_fit[1], scale=reduced_chi2_fit[2])
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111)
-    ax.hist(reduced_chi2_observed, bins=50, density=True, alpha=0.5, label='Observed Reduced Chi2')
+    ax.hist(reduced_chi2_observed, bins=50, density=True, alpha=0.5, label='Observed Distribution')
     ax.plot(np.arange(0, np.max(reduced_chi2_observed), 0.1), expected_chi2, label='Expected Chi2 PDF', color='tab:red')
     ax.plot(np.arange(0, np.max(reduced_chi2_observed), 0.1), fitted_chi2, label='Fitted Chi2 PDF', color='tab:green')
     ax.set_xlabel('Error Distribution')
