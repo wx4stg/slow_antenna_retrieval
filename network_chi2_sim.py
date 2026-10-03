@@ -9,42 +9,8 @@ import numpy as np
 from matplotlib import pyplot as plt
 import pandas as pd
 from scipy.stats import chi2
-from pyxlma import coords
-from pyhigh import get_elevation_batch
-from shapely import wkt
 import xarray as xr
 from dask.distributed import Client
-
-
-def station_geometry_to_x_y_z(station_df):
-    """
-    Convert station latitude, longitude, and altitude to x, y, z coordinates in a tangent plane Cartesian system.
-
-    Parameters
-    ----------
-    station_df : pd.DataFrame
-        A DataFrame containing the station information, including 'lat', 'lon', and 'alt' columns for the station coordinates.
-
-    Returns
-    -------
-    station_df : pd.DataFrame
-        The input DataFrame with additional 'x', 'y', and 'z' columns for the station coordinates in the tangent plane Cartesian system.
-    """
-    station_df['geometry'] = station_df['WKT'].apply(wkt.loads)
-    station_df['lon'] = station_df['geometry'].apply(lambda x: x.x)
-    station_df['lat'] = station_df['geometry'].apply(lambda x: x.y)
-    station_df['alt'] = get_elevation_batch(list(zip(station_df['lat'].values, station_df['lon'].values)))
-    grid_ctr_lat = station_df['lat'].mean()
-    grid_ctr_lon = station_df['lon'].mean()
-    grid_ctr_alt = station_df['alt'].mean()
-    geosys = coords.GeographicSystem()
-    tpcs = coords.TangentPlaneCartesianSystem(ctrLat=grid_ctr_lat, ctrLon=grid_ctr_lon, ctrAlt=grid_ctr_alt)
-    station_X, station_Y, station_Z = geosys.toECEF(station_df['lon'].values, station_df['lat'].values, station_df['alt'].values)
-    station_x, station_y, station_z = tpcs.fromECEF(station_X, station_Y, station_Z)
-    station_df['x'] = station_x
-    station_df['y'] = station_y
-    station_df['z'] = station_z
-    return station_df
 
 
 if __name__ == "__main__":
