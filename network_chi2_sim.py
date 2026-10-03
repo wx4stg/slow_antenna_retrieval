@@ -9,14 +9,12 @@ import numpy as np
 from matplotlib import pyplot as plt
 import pandas as pd
 from scipy.stats import chi2
+from pyxlma import coords
 import xarray as xr
 from dask.distributed import Client
-
+from os import cpu_count
 
 if __name__ == "__main__":
-    print("Starting Dask cluster...")
-    cluster = Client(processes=True, n_workers=16, threads_per_worker=1, memory_limit='2GB')
-    print(f"Dask dashboard available at: {cluster.dashboard_link}")
     parser = argparse.ArgumentParser(description='Simulate a network of slow antenna stations and get location-dependent error distribution.')
     parser.add_argument('--station_csv', type=str, default='station_locations.csv', help='Path to the CSV file containing station information.')
     parser.add_argument('--L_x', type=float, default=30, help='Length of the grid in the x direction (km).')
@@ -30,6 +28,9 @@ if __name__ == "__main__":
     parser.add_argument('--error_scale', type=float, default=150, help='Scale of the Gaussian noise to be added to the delta E values (V/m).')
     parser.add_argument('--chunk_size', type=int, default=50, help='Chunk size for Dask array processing.')
     args = parser.parse_args()
+    print("Starting Dask cluster...")
+    cluster = Client(processes=True, n_workers=cpu_count()//2, threads_per_worker=1, memory_limit='512MB')
+    print(f"Dask dashboard available at: {cluster.dashboard_link}")
     L_x, n_x = args.L_x, args.n_x
     L_y, n_y = args.L_y, args.n_y
     L_z, n_z = args.L_z, args.n_z
