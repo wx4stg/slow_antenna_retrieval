@@ -80,7 +80,7 @@ def dipole_E_change(x, y, z, q, xi, yi, zi, dr):
     # compute r vector from stroke to station
     dx = x - xi
     dy = y - yi
-    dz = z - np.zeros_like(xi)
+    dz = z - zi
     # compute charge moment vector, p = dr * q
     p = np.array((drx, dry, drz)) * q
     r = np.array((dx, dy, dz))
