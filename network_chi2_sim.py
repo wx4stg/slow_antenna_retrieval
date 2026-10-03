@@ -55,10 +55,10 @@ if __name__ == "__main__":
     parser.add_argument('--station_csv', type=str, default='station_locations.csv', help='Path to the CSV file containing station information.')
     parser.add_argument('--L_x', type=float, default=30, help='Length of the grid in the x direction (km).')
     parser.add_argument('--L_y', type=float, default=30, help='Length of the grid in the y direction (km).')
-    parser.add_argument('--L_z', type=float, default=10, help='Length of the grid in the z direction (km).')
+    parser.add_argument('--L_z', type=float, default=20, help='Length of the grid in the z direction (km).')
     parser.add_argument('--n_x', type=int, default=31, help='Number of grid points in the x direction.')
     parser.add_argument('--n_y', type=int, default=31, help='Number of grid points in the y direction.')
-    parser.add_argument('--n_z', type=int, default=10, help='Number of grid points in the z direction.')
+    parser.add_argument('--n_z', type=int, default=20, help='Number of grid points in the z direction.')
     parser.add_argument('-q', '--Q_coloumbs', type=float, default=3, help='Charge of the monopole in coloumbs.')
     parser.add_argument('-n', '--num-sims', type=int, default=10, help='Number of simulations to run.')
     parser.add_argument('--error_scale', type=float, default=150, help='Scale of the Gaussian noise to be added to the delta E values (V/m).')
@@ -81,7 +81,7 @@ if __name__ == "__main__":
     x_vals = np.linspace(-L_x/2, L_x/2, n_x)*1e3
     y_vals = np.linspace(-L_y/2, L_y/2, n_y)*1e3
     z_vals = np.linspace(0, L_z, n_z)*1e3
-    x_grid, y_grid, z_grid = np.meshgrid(x_vals, y_vals, z_vals)
+    x_grid, y_grid, z_grid = np.meshgrid(x_vals, y_vals, z_vals, indexing='ij')
     q_grid = np.full_like(x_grid, Q_coloumbs)
 
     x_grid_flat, y_grid_flat, z_grid_flat = x_grid.flatten(), y_grid.flatten(), z_grid.flatten()
@@ -132,9 +132,9 @@ if __name__ == "__main__":
     )
     all_sims.to_netcdf('all_retrievals.nc')
     # step 6 -- calculate and fit a chi2 distribution
-    delta_e_ideal_extended = np.tile(delta_e_ideal, (num_sims, 1, 1, 1, 1))
-    err_dist_normalized = (delta_e_retrieved - delta_e_ideal_extended) / error_scale
-    reduced_chi2_observed = np.sum(err_dist_normalized**2, axis=1).flatten()
+    delta_e_ideal_extended = np.tile(delta_e_ideal.reshape(*x_grid.shape, station_df.shape[0]), (num_sims, 1, 1, 1, 1))
+    err_dist_normalized = (all_ret_delta_e - delta_e_ideal_extended) / error_scale
+    reduced_chi2_observed = np.sum(err_dist_normalized**2, axis=-1).flatten()
     reduced_chi2_fit = chi2.fit(reduced_chi2_observed)
     print(f'Fitted Chi2 parameters: DoF={reduced_chi2_fit[0]:.2f}, loc={reduced_chi2_fit[1]:.2f}, scale={reduced_chi2_fit[2]:.2f}')
     expected_chi2 = chi2.pdf(np.arange(0, np.max(reduced_chi2_observed), 0.1), df=4, loc=0, scale=1)
