@@ -93,7 +93,7 @@ def dipole_E_change(x, y, z, q, xi, yi, zi, dr):
     return delta_E # V/m
 
 
-def monopole_delta_E_error(params, observed_E, station_info, restrict_x=None, restrict_y=None, restrict_z=None):
+def monopole_delta_E_error(params, observed_E, station_xyz, restrict_x=None, restrict_y=None, restrict_z=None):
     """
     Calculate the error between the observed electric field changes and the predicted electric field changes for a given set of monopole parameters.
 
@@ -103,8 +103,8 @@ def monopole_delta_E_error(params, observed_E, station_info, restrict_x=None, re
         An array containing the monopole parameters (q, x, y, z) to be optimized. Shape should be (4,).
     observed_E : array-like
         A 1D array of shape (N_stations,) containing the observed electric field changes at each station for the stroke.
-    station_info : pd.DataFrame
-        A DataFrame containing the station information, including 'x' and 'y' and 'z' columns for the station coordinates.
+    station_xyz : array-like
+        A 2D array of shape (3, N_stations) containing the x, y, and z coordinates of each station.
 
     Returns
     -------
@@ -124,11 +124,11 @@ def monopole_delta_E_error(params, observed_E, station_info, restrict_x=None, re
     else:
         z = params[3]
     q = params[0]
-    predicted_E = monopole_E_change(x, y, z, q, station_info['x'], station_info['y'], station_info['z'])
+    predicted_E = monopole_E_change(x, y, z, q, station_xyz[0], station_xyz[1], station_xyz[2])
     return observed_E - np.reshape(predicted_E, observed_E.shape)
 
 
-def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_df, constrain_xyz=False):
+def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_xyz, constrain_xyz=False):
     """
     Retrieve the location and charge removed by a monopole discharge stroke.
 
@@ -144,23 +144,23 @@ def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y,
         An initial guess for the z coordinate of the stroke.
     stroke_obs : np.ndarray
         A 1D array of shape (N_stations,) containing the observed electric field changes at each station for the stroke.
-    station_df : pd.DataFrame
-        A DataFrame containing the station information, including 'x' and 'y' and 'z' columns for the station coordinates.
+    station_xyz : array-like
+        A 2D array of shape (3, N_stations) containing the x, y, and z coordinates of each station.
     constrain_xyz : bool, optional
         If True, require that the solution use the provided initial guesses for x, y, and z (solving only for q). Default is False.
     """
-    z_min = station_df['z'].min()
+    z_min = station_xyz[2].min()
     try:
         if constrain_xyz:
             prefilled = partial(monopole_delta_E_error, restrict_x=initial_guess_x, restrict_y=initial_guess_y, restrict_z=initial_guess_z)
-            retrieved_opt = least_squares(prefilled, x0=np.array([initial_guess_q]), bounds=([-np.inf], [np.inf]), args=(stroke_obs, station_df)).x
+            retrieved_opt = least_squares(prefilled, x0=np.array([initial_guess_q]), bounds=([-np.inf], [np.inf]), args=(stroke_obs, station_xyz)).x
             retrieved_opt = np.array([retrieved_opt[0], initial_guess_x, initial_guess_y, initial_guess_z])
         else:
             retrieved_opt = least_squares(monopole_delta_E_error,
                         x0=np.array([initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z]),
                         bounds=([-np.inf, -np.inf, -np.inf, z_min], [np.inf, np.inf, np.inf, np.inf]),
                         args=(stroke_obs,
-                        station_df)).x
+                        station_xyz)).x
     except ValueError as e:
                 print(f"Initial Guess: q={initial_guess_q}, x={initial_guess_x}, y={initial_guess_y}, z={initial_guess_z}")
                 print(f"Observations: {stroke_obs}")
@@ -198,8 +198,9 @@ def multi_monopole_retrieval_dask(all_monopoles, station_df, initial_guess_q=1, 
     this_charge_obs = da.from_array(all_monopoles, chunks=(chunk_size, -1)) # observations for all charges, shape (N_strokes, N_stations)
     station_largest_ob_idx = np.argmax(np.abs(all_monopoles), axis=1)
     initial_guess = da.from_array(station_df[['x', 'y', 'z']].to_numpy()[station_largest_ob_idx], chunks=(chunk_size, -1)) # station x, y, z for each initial guess, shape (N_strokes, 3)
+    station_xyz = np.array([station_df['x'].values, station_df['y'].values, station_df['z'].values]) # shape (3, N_stations)
     # retrieve the charge parameters for every stroke in parallel using the charge retrieval function
-    all_retrievals = da.apply_gufunc(partial(monopole_charge_retrieval, station_df=station_df), '(),(),(),(),(n)->(p)',
+    all_retrievals = da.apply_gufunc(partial(monopole_charge_retrieval, station_xyz=station_xyz), '(),(),(),(),(n)->(p)',
                                         initial_guess_q, # initial_guess_q
                                         initial_guess[:, 0], # initial_guess_x
                                         initial_guess[:, 1], # initial_guess_y
