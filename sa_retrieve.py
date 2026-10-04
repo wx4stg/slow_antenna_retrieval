@@ -128,6 +128,20 @@ def monopole_delta_E_error(params, observed_E, station_xyz, restrict_x=None, res
     return observed_E - np.reshape(predicted_E, observed_E.shape)
 
 
+def monopole_delta_E_jacobian(params, observed_E, station_xyz):
+    q, x, y, z = params
+    dx = x - station_xyz[0]
+    dy = y - station_xyz[1]
+    dz = z - station_xyz[2]
+    r_mag_squared = dx**2 + dy**2 + dz**2
+    k = 1/(4*np.pi*EPSILON_0)
+    partialE_partialq = k * (2*dz / r_mag_squared**(3/2))
+    partialE_partialx = k * (-3*q*dz*r_mag_squared**(-5/2) * 2 * dx)
+    partialE_partialy = k * (-3*q*dz*r_mag_squared**(-5/2) * 2 * dy)
+    partialE_partialz = k * (2*q) * (r_mag_squared**(-3/2) - 3 * dz**2 * r_mag_squared**(-5/2))
+    return -np.vstack((partialE_partialq, partialE_partialx, partialE_partialy, partialE_partialz)).T
+
+
 def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_xyz, constrain_xyz=False):
     """
     Retrieve the location and charge removed by a monopole discharge stroke.
@@ -159,8 +173,7 @@ def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y,
             retrieved_opt = least_squares(monopole_delta_E_error,
                         x0=np.array([initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z]),
                         bounds=([-np.inf, -np.inf, -np.inf, z_min], [np.inf, np.inf, np.inf, np.inf]),
-                        args=(stroke_obs,
-                        station_xyz)).x
+                        args=(stroke_obs, station_xyz), jac=monopole_delta_E_jacobian).x
     except ValueError as e:
                 print(f"Initial Guess: q={initial_guess_q}, x={initial_guess_x}, y={initial_guess_y}, z={initial_guess_z}")
                 print(f"Observations: {stroke_obs}")
@@ -181,7 +194,7 @@ def multi_monopole_retrieval_dask(all_monopoles, station_df, initial_guess_q=1, 
     station_df : pd.DataFrame
         A DataFrame containing the station information, including 'x' and 'y' and 'z' columns for the station coordinates.
     initial_guess_q : float, optional
-        An optional initial guess for the charge of each stroke. Default is 0.
+        An optional initial guess for the charge of each stroke. Default is 1.
 
     Returns
     -------
