@@ -47,52 +47,6 @@ def monopole_E_change(x, y, z, q, xi, yi, zi):
     return delta_E # V/m
 
 
-def dipole_E_change(x, y, z, q, xi, yi, zi, dr):
-    """
-    Calculate the change in electric field due to a dipole charge at a given position.
-
-    Parameters
-    ----------
-    x, y, z, q : array-like
-        The x, y, z coordinates of the charge (stroke) positions. Shape should be (N_strokes,).
-    xi, yi, zi : array-like
-        The x, y, z coordinates of the station positions. Shape should be (N_stations,).
-    dr : array-like
-        The dipole moment vector components (dr_x, dr_y, dr_z). Shape should be (3, N_strokes).
-
-    Returns
-    -------
-    delta_E : ndarray
-        The change in electric field at each station due to each charge. Shape will be (N_strokes, N_stations).
-    """
-    # reshape so that all 'stroke' parameters are on axis 0
-    x = np.array(x).reshape(-1, 1)
-    y = np.array(y).reshape(-1, 1)
-    z = np.array(z).reshape(-1, 1)
-    q = np.array(q).reshape(-1, 1)
-    drx = dr[0, :].reshape(-1, 1)
-    dry = dr[1, :].reshape(-1, 1)
-    drz = dr[2, :].reshape(-1, 1)
-    # reshape so that all 'station' parameters are on axis 1
-    xi = np.array(xi).reshape(1, -1)
-    yi = np.array(yi).reshape(1, -1)
-    zi = np.array(zi).reshape(1, -1)
-    # compute r vector from stroke to station
-    dx = x - xi
-    dy = y - yi
-    dz = z - zi
-    # compute charge moment vector, p = dr * q
-    p = np.array((drx, dry, drz)) * q
-    r = np.array((dx, dy, dz))
-    r_mag = np.linalg.norm(r, axis=0)
-    # dot product of r and p, r_dot_p = r_x*p_x + r_y*p_y + r_z*p_z
-    r_dot_p = np.sum(r*p, axis=0)
-    # calculate E-field change using dipole formula, \frac{1}{4\pi\epsilon_0} (\frac{2p_z}{r^3} - \frac{6z}{r^5} (r \cdot p))
-    k_const = 1/(4*np.pi*EPSILON_0)
-    delta_E = k_const * ((2*p[2, :]/(r_mag**3)) - (6*dz)/(r_mag**5) * r_dot_p)
-    return delta_E # V/m
-
-
 def monopole_delta_E_error(params, observed_E, station_xyz, restrict_x=None, restrict_y=None, restrict_z=None):
     """
     Calculate the error between the observed electric field changes and the predicted electric field changes for a given set of monopole parameters.
@@ -206,8 +160,66 @@ def monopole_q_analytic(x, y, z, stroke_obs, station_xyz):
     dz = z - station_xyz[2]
     r_mag_squared = dx**2 + dy**2 + dz**2
     k = 1/(4*np.pi*EPSILON_0)
-    q = np.sum(stroke_obs * r_mag_squared**(3/2) / (2*k*dz))
+    q = np.mean(stroke_obs * r_mag_squared**(3/2) / (2*k*dz))
     return q
+
+
+def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None):
+    """
+    Retrieve the location and charge removed by a monopole discharge stroke using geographic coordinates.
+
+    Parameters
+    ----------
+    stroke_obs : np.ndarray
+        A 1D array of shape (N_stations,) containing the observed electric field changes at each station for the stroke.
+    station_df : pd.DataFrame
+        A DataFrame containing the station information, including 'lon', 'lat', and 'alt' columns for the station coordinates.
+    bounds : tuple, optional
+        A tuple of the form (lower_bounds, upper_bounds) where lower_bounds and upper_bounds are (4,) arrays of q, lon, lat, alt.
+        Default is None (-inf to inf for q, lon, lat; lowest station height to inf for alt).
+    
+    Returns
+    -------
+    retrieved_lon : float
+        The retrieved longitude of the stroke.
+    retrieved_lat : float
+        The retrieved latitude of the stroke.
+    retrieved_alt : float
+        The retrieved altitude of the stroke.
+    retrieved_q : float
+        The retrieved charge of the stroke.
+    """
+    from pyxlma import coords
+    station_lon, station_lat, station_alt = station_df['lon'].values, station_df['lat'].values, station_df['alt'].values
+    tpcs = coords.TangentPlaneCartesianSystem(ctrLat=station_df['lat'].mean(), ctrLon=station_df['lon'].mean(), ctrAlt=station_df['alt'].min())
+    geosys = coords.GeographicSystem()
+    station_ECEF = geosys.toECEF(station_lon, station_lat, station_alt)
+    station_xyz = tpcs.fromECEF(*station_ECEF)
+    if bounds is not None:
+        lower_bounds, upper_bounds = bounds
+        q_bounds = (lower_bounds[0], upper_bounds[0])
+        upper_bounds_xyz = tpcs.fromECEF(*geosys.toECEF(upper_bounds[1], upper_bounds[2], upper_bounds[3]))
+        lower_bounds_xyz = tpcs.fromECEF(*geosys.toECEF(lower_bounds[1], lower_bounds[2], lower_bounds[3]))
+        bounds_xyz = (np.array([q_bounds[0], lower_bounds_xyz[0], lower_bounds_xyz[1], lower_bounds_xyz[2]]),
+                      np.array([q_bounds[1], upper_bounds_xyz[0], upper_bounds_xyz[1], upper_bounds_xyz[2]]))
+    else:
+        bounds_xyz = None
+    initial_guess_q = 1
+    station_largest_ob_idx = np.argmax(np.abs(stroke_obs))
+    if bounds is not None:
+        if bounds[0][1] == bounds[1][1] and bounds[0][2] == bounds[1][2] and bounds[0][3] == bounds[1][3]:
+            # if the flash location is fixed, use the analytic solution for q
+            ret_q = monopole_q_analytic(bounds_xyz[0][1], bounds_xyz[0][2], bounds_xyz[0][3], stroke_obs, station_xyz)
+            ret_xyz = np.array([bounds_xyz[0][1], bounds_xyz[0][2], bounds_xyz[0][3]])
+            ret_lon, ret_lat, ret_alt = geosys.fromECEF(*tpcs.toECEF(ret_xyz[0], ret_xyz[1], ret_xyz[2]))
+            return ret_lon, ret_lat, ret_alt, ret_q
+    initial_guess_xyz = station_xyz[:, station_largest_ob_idx]
+    retrieved_opt = monopole_charge_retrieval(initial_guess_q, initial_guess_xyz[0], initial_guess_xyz[1], initial_guess_xyz[2] + 1000, stroke_obs, station_xyz, bounds=bounds_xyz)
+    retrieved_q = retrieved_opt[0]
+    retrieved_xyz = retrieved_opt[1:]
+    retrieved_lon, retrieved_lat, retrieved_alt = geosys.fromECEF(*tpcs.toECEF(retrieved_xyz[0], retrieved_xyz[1], retrieved_xyz[2]))
+    return retrieved_lon, retrieved_lat, retrieved_alt, retrieved_q
+
 
 def multi_monopole_retrieval_dask(all_monopoles, station_df, initial_guess_q=1, chunk_size=50):
     """
@@ -252,3 +264,48 @@ def multi_monopole_retrieval_dask(all_monopoles, station_df, initial_guess_q=1, 
     retrieved_z = all_retrievals[:, 3]
     retrieved_q = all_retrievals[:, 0]
     return retrieved_x, retrieved_y, retrieved_z, retrieved_q
+
+def dipole_E_change(x, y, z, q, xi, yi, zi, dr):
+    """
+    Calculate the change in electric field due to a dipole charge at a given position.
+
+    Parameters
+    ----------
+    x, y, z, q : array-like
+        The x, y, z coordinates of the charge (stroke) positions. Shape should be (N_strokes,).
+    xi, yi, zi : array-like
+        The x, y, z coordinates of the station positions. Shape should be (N_stations,).
+    dr : array-like
+        The dipole moment vector components (dr_x, dr_y, dr_z). Shape should be (3, N_strokes).
+
+    Returns
+    -------
+    delta_E : ndarray
+        The change in electric field at each station due to each charge. Shape will be (N_strokes, N_stations).
+    """
+    # reshape so that all 'stroke' parameters are on axis 0
+    x = np.array(x).reshape(-1, 1)
+    y = np.array(y).reshape(-1, 1)
+    z = np.array(z).reshape(-1, 1)
+    q = np.array(q).reshape(-1, 1)
+    drx = dr[0, :].reshape(-1, 1)
+    dry = dr[1, :].reshape(-1, 1)
+    drz = dr[2, :].reshape(-1, 1)
+    # reshape so that all 'station' parameters are on axis 1
+    xi = np.array(xi).reshape(1, -1)
+    yi = np.array(yi).reshape(1, -1)
+    zi = np.array(zi).reshape(1, -1)
+    # compute r vector from stroke to station
+    dx = x - xi
+    dy = y - yi
+    dz = z - zi
+    # compute charge moment vector, p = dr * q
+    p = np.array((drx, dry, drz)) * q
+    r = np.array((dx, dy, dz))
+    r_mag = np.linalg.norm(r, axis=0)
+    # dot product of r and p, r_dot_p = r_x*p_x + r_y*p_y + r_z*p_z
+    r_dot_p = np.sum(r*p, axis=0)
+    # calculate E-field change using dipole formula, \frac{1}{4\pi\epsilon_0} (\frac{2p_z}{r^3} - \frac{6z}{r^5} (r \cdot p))
+    k_const = 1/(4*np.pi*EPSILON_0)
+    delta_E = k_const * ((2*p[2, :]/(r_mag**3)) - (6*dz)/(r_mag**5) * r_dot_p)
+    return delta_E # V/m
