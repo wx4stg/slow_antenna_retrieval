@@ -41,7 +41,7 @@ if __name__ == "__main__":
     # Step 0: read in station dataframe
     station_df = pd.read_csv(args.station_csv)
     geosys = coords.GeographicSystem()
-    tpcs = coords.TangentPlaneCartesianSystem(ctrLat=station_df['lat'].mean(), ctrLon=station_df['lon'].mean(), ctrAlt=station_df['alt'].mean())
+    tpcs = coords.TangentPlaneCartesianSystem(ctrLat=station_df['lat'].mean(), ctrLon=station_df['lon'].mean(), ctrAlt=station_df['alt'].min())
     station_ECEF = geosys.toECEF(station_df['lon'].values, station_df['lat'].values, station_df['alt'].values)
     station_df['x'], station_df['y'], station_df['z'] = tpcs.fromECEF(*station_ECEF)
     # step 1 -- create grids of X, Y, Z, Q in shape (Nx, Ny, Nz)
@@ -97,6 +97,9 @@ if __name__ == "__main__":
             'station': station_df.index
         }
     )
+    all_sims.attrs['center_lat'] = station_df['lat'].mean()
+    all_sims.attrs['center_lon'] = station_df['lon'].mean()
+    all_sims.attrs['center_alt'] = station_df['alt'].min()
     all_sims.to_netcdf('all_retrievals.nc')
     # step 6 -- calculate and fit a chi2 distribution
     delta_e_ideal_extended = np.tile(delta_e_ideal.reshape(*x_grid.shape, station_df.shape[0]), (num_sims, 1, 1, 1, 1))
