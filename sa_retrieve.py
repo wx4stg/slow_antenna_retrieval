@@ -142,7 +142,7 @@ def monopole_delta_E_jacobian(params, observed_E, station_xyz):
     return -np.vstack((partialE_partialq, partialE_partialx, partialE_partialy, partialE_partialz)).T
 
 
-def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_xyz, constrain_xyz=False):
+def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_xyz, bounds=None):
     """
     Retrieve the location and charge removed by a monopole discharge stroke.
 
@@ -160,20 +160,20 @@ def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y,
         A 1D array of shape (N_stations,) containing the observed electric field changes at each station for the stroke.
     station_xyz : array-like
         A 2D array of shape (3, N_stations) containing the x, y, and z coordinates of each station.
-    constrain_xyz : bool, optional
-        If True, require that the solution use the provided initial guesses for x, y, and z (solving only for q). Default is False.
+    bounds : tuple, optional
+        A tuple of the form (lower_bounds, upper_bounds) where lower_bounds and upper_bounds are arrays of the same shape as the parameter vector.
+        Default is None (-inf to inf for x,y,q; lowest station height to inf for z).
     """
-    z_min = station_xyz[2].min()
+    if bounds is not None:
+        lower_bounds, upper_bounds = bounds
+    else:
+        lower_bounds = [-np.inf, -np.inf, -np.inf, station_xyz[2].min()]
+        upper_bounds = [np.inf, np.inf, np.inf, np.inf]
     try:
-        if constrain_xyz:
-            prefilled = partial(monopole_delta_E_error, restrict_x=initial_guess_x, restrict_y=initial_guess_y, restrict_z=initial_guess_z)
-            retrieved_opt = least_squares(prefilled, x0=np.array([initial_guess_q]), bounds=([-np.inf], [np.inf]), args=(stroke_obs, station_xyz)).x
-            retrieved_opt = np.array([retrieved_opt[0], initial_guess_x, initial_guess_y, initial_guess_z])
-        else:
-            retrieved_opt = least_squares(monopole_delta_E_error,
-                        x0=np.array([initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z]),
-                        bounds=([-np.inf, -np.inf, -np.inf, z_min], [np.inf, np.inf, np.inf, np.inf]),
-                        args=(stroke_obs, station_xyz), jac=monopole_delta_E_jacobian).x
+        retrieved_opt = least_squares(monopole_delta_E_error,
+                    x0=np.array([initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z]),
+                    bounds=(lower_bounds, upper_bounds),
+                    args=(stroke_obs, station_xyz), jac=monopole_delta_E_jacobian).x
     except ValueError as e:
                 print(f"Initial Guess: q={initial_guess_q}, x={initial_guess_x}, y={initial_guess_y}, z={initial_guess_z}")
                 print(f"Observations: {stroke_obs}")
@@ -181,6 +181,33 @@ def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y,
                 return np.array([np.nan, np.nan, np.nan, np.nan])
     
     return retrieved_opt
+
+
+def monopole_q_analytic(x, y, z, stroke_obs, station_xyz):
+    """
+    Analytically retrieve the charge of a monopole discharge stroke given its location and the observed electric field changes at each station.
+
+    Parameters
+    ----------
+    x, y, z : float
+        The x, y, z coordinates of the stroke to be retrieved.
+    stroke_obs : np.ndarray
+            A 1D array of shape (N_stations,) containing the observed electric field changes at each station for the stroke.
+    station_xyz : array-like
+        A 2D array of shape (3, N_stations) containing the x, y, and z coordinates of each station.
+
+    Returns
+    -------
+    q : float
+        The analytically retrieved charge of the stroke.
+    """
+    dx = x - station_xyz[0]
+    dy = y - station_xyz[1]
+    dz = z - station_xyz[2]
+    r_mag_squared = dx**2 + dy**2 + dz**2
+    k = 1/(4*np.pi*EPSILON_0)
+    q = np.sum(stroke_obs * r_mag_squared**(3/2) / (2*k*dz))
+    return q
 
 def multi_monopole_retrieval_dask(all_monopoles, station_df, initial_guess_q=1, chunk_size=50):
     """
