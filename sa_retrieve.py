@@ -160,7 +160,8 @@ def monopole_q_analytic(x, y, z, stroke_obs, station_xyz):
     dz = z - station_xyz[2]
     r_mag_squared = dx**2 + dy**2 + dz**2
     k = 1/(4*np.pi*EPSILON_0)
-    q = np.mean(stroke_obs * r_mag_squared**(3/2) / (2*k*dz))
+    g = 2*k*dz / r_mag_squared**(3/2) # dE per coulomb at each station
+    q = np.sum(stroke_obs * g) / np.sum(g**2) # (dE * (dE/C)) / ((dE/C)^2) = C least squares solution
     return q
 
 
