@@ -256,7 +256,6 @@ def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None, return_re
     retrieved_xyz = retrieved_opt[1:4]
     retrieved_lon, retrieved_lat, retrieved_alt = geosys.fromECEF(*tpcs.toECEF(retrieved_xyz[0], retrieved_xyz[1], retrieved_xyz[2]))
     if return_residual:
-        residuals = retrieved_opt[4]
         return retrieved_lon, retrieved_lat, retrieved_alt, retrieved_q, residuals
     return retrieved_lon, retrieved_lat, retrieved_alt, retrieved_q
 
