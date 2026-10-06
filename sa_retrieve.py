@@ -248,7 +248,10 @@ def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None, return_re
                 residuals = monopole_delta_E_error([retrieved_q, *initial_guess[1:]], stroke_obs, station_xyz)
                 return lon_bounds[0], lat_bounds[0], alt_bounds[0], retrieved_q, residuals
             return lon_bounds[0], lat_bounds[0], alt_bounds[0], retrieved_q
-    retrieved_opt = monopole_charge_retrieval(*initial_guess, stroke_obs, station_xyz, bounds=bounds_qxyz, return_residual=return_residual)
+    if return_residual:
+        retrieved_opt, residuals = monopole_charge_retrieval(*initial_guess, stroke_obs, station_xyz, bounds=bounds_qxyz, return_residual=True)
+    else:
+        retrieved_opt = monopole_charge_retrieval(*initial_guess, stroke_obs, station_xyz, bounds=bounds_qxyz)
     retrieved_q = retrieved_opt[0]
     retrieved_xyz = retrieved_opt[1:4]
     retrieved_lon, retrieved_lat, retrieved_alt = geosys.fromECEF(*tpcs.toECEF(retrieved_xyz[0], retrieved_xyz[1], retrieved_xyz[2]))
