@@ -96,7 +96,7 @@ def monopole_delta_E_jacobian(params, observed_E, station_xyz):
     return -np.vstack((partialE_partialq, partialE_partialx, partialE_partialy, partialE_partialz)).T
 
 
-def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_xyz, bounds=None):
+def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y, initial_guess_z, stroke_obs, station_xyz, bounds=None, return_residual=False):
     """
     Retrieve the location and charge removed by a monopole discharge stroke.
 
@@ -117,6 +117,15 @@ def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y,
     bounds : tuple, optional
         A tuple of the form (lower_bounds, upper_bounds) where lower_bounds and upper_bounds are arrays of the same shape as the parameter vector.
         Default is None (-inf to inf for x,y,q; lowest station height to inf for z).
+    return_residual : bool, optional
+        If True, return the residuals of the least squares optimization. Default is False.
+
+    Returns
+    -------
+    retrieved_opt : np.ndarray
+        A 1D array of shape (4,) containing the retrieved parameters (q, x, y, z) of the stroke. Values will be NaN if the optimization fails.
+    residuals : np.ndarray, optional
+        A 1D array of shape (N_stations,) containing the residuals of the least squares optimization. Only returned if return_residual is True.
     """
     if bounds is not None:
         lower_bounds, upper_bounds = bounds
@@ -132,8 +141,12 @@ def monopole_charge_retrieval(initial_guess_q, initial_guess_x, initial_guess_y,
                 print(f"Initial Guess: q={initial_guess_q}, x={initial_guess_x}, y={initial_guess_y}, z={initial_guess_z}")
                 print(f"Observations: {stroke_obs}")
                 print(f"Error: {e}")
+                if return_residual:
+                    return np.array([np.nan, np.nan, np.nan, np.nan]), np.array([np.nan]*len(stroke_obs))
                 return np.array([np.nan, np.nan, np.nan, np.nan])
-    
+    if return_residual:
+        residuals = monopole_delta_E_error(retrieved_opt, stroke_obs, station_xyz)
+        return retrieved_opt, residuals
     return retrieved_opt
 
 
@@ -166,7 +179,7 @@ def monopole_q_analytic(x, y, z, stroke_obs, station_xyz):
 
 
 
-def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None):
+def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None, return_residual=False):
     """
     Retrieve the location and charge removed by a monopole discharge stroke using geographic coordinates.
 
@@ -181,6 +194,8 @@ def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None):
         Default is None (-inf to inf for q, lon, lat; lowest station height to inf for alt). Specifying None for either the upper or lower bound for
         a parameter will set that bound to its default. If any of the three geographic coordinates are bounded, bounds for the other two geographic coordinates
         are required.
+    return_residual : bool, optional
+        If True, return the residuals of the least squares optimization. Default is False.
     
     Returns
     -------
@@ -192,6 +207,8 @@ def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None):
         The retrieved altitude of the stroke.
     retrieved_q : float
         The retrieved charge of the stroke.
+    residuals : np.ndarray, optional
+        A 1D array of shape (N_stations,) containing the residuals of the least squares optimization. Only returned if return_residual is True.
     """
     from pyxlma import coords
     station_lon, station_lat, station_alt = station_df['lon'].values, station_df['lat'].values, station_df['alt'].values
@@ -227,11 +244,17 @@ def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None):
         if np.all(bounds_qxyz[0][1:] == bounds_qxyz[1][1:]):
             # if the x, y, z bounds are all equal, then analytically solve for the charge
             retrieved_q = monopole_q_analytic(*initial_guess[1:], stroke_obs, station_xyz)
+            if return_residual:
+                residuals = monopole_delta_E_error([retrieved_q, *initial_guess[1:]], stroke_obs, station_xyz)
+                return lon_bounds[0], lat_bounds[0], alt_bounds[0], retrieved_q, residuals
             return lon_bounds[0], lat_bounds[0], alt_bounds[0], retrieved_q
-    retrieved_opt = monopole_charge_retrieval(*initial_guess, stroke_obs, station_xyz, bounds=bounds_qxyz)
+    retrieved_opt = monopole_charge_retrieval(*initial_guess, stroke_obs, station_xyz, bounds=bounds_qxyz, return_residual=return_residual)
     retrieved_q = retrieved_opt[0]
-    retrieved_xyz = retrieved_opt[1:]
+    retrieved_xyz = retrieved_opt[1:4]
     retrieved_lon, retrieved_lat, retrieved_alt = geosys.fromECEF(*tpcs.toECEF(retrieved_xyz[0], retrieved_xyz[1], retrieved_xyz[2]))
+    if return_residual:
+        residuals = retrieved_opt[4]
+        return retrieved_lon, retrieved_lat, retrieved_alt, retrieved_q, residuals
     return retrieved_lon, retrieved_lat, retrieved_alt, retrieved_q
 
 
