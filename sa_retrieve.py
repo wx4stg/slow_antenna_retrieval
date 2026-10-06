@@ -166,7 +166,7 @@ def monopole_q_analytic(x, y, z, stroke_obs, station_xyz):
 
 
 
-def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None, initial_guess_q=1.0):
+def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None):
     """
     Retrieve the location and charge removed by a monopole discharge stroke using geographic coordinates.
 
@@ -178,7 +178,9 @@ def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None, initial_g
         A DataFrame containing the station information, including 'lon', 'lat', and 'alt' columns for the station coordinates.
     bounds : tuple, optional
         A tuple of the form (lower_bounds, upper_bounds) where lower_bounds and upper_bounds are (4,) arrays of q, lon, lat, alt.
-        Default is None (-inf to inf for q, lon, lat; lowest station height to inf for alt).
+        Default is None (-inf to inf for q, lon, lat; lowest station height to inf for alt). Specifying None for either the upper or lower bound for
+        a parameter will set that bound to its default. If any of the three geographic coordinates are bounded, bounds for the other two geographic coordinates
+        are required.
     
     Returns
     -------
@@ -193,35 +195,40 @@ def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None, initial_g
     """
     from pyxlma import coords
     station_lon, station_lat, station_alt = station_df['lon'].values, station_df['lat'].values, station_df['alt'].values
-    tpcs = coords.TangentPlaneCartesianSystem(ctrLat=station_df['lat'].mean(), ctrLon=station_df['lon'].mean(), ctrAlt=station_df['alt'].min())
+    tpcs = coords.TangentPlaneCartesianSystem(ctrLat=station_lat.mean(), ctrLon=station_lon.mean(), ctrAlt=station_alt.min())
     geosys = coords.GeographicSystem()
     station_ECEF = geosys.toECEF(station_lon, station_lat, station_alt)
     station_xyz = np.array(tpcs.fromECEF(*station_ECEF))
+    bounds_qxyz = None
+    station_largest_ob_idx = np.argmax(np.abs(stroke_obs))
+    initial_guess = np.array([1.0, *station_xyz[:, station_largest_ob_idx]]) + [0, 0, 0, 1000] # initial guess 1C, 1km above the station with the largest observation
     if bounds is not None:
         lower_bounds, upper_bounds = bounds
-        alt_pair = np.array([lower_bounds[3], upper_bounds[3]], dtype=float)
-        alt_finite = np.isfinite(alt_pair)
-        corner_alts = np.where(alt_finite, alt_pair, alt_pair[alt_finite].min() if alt_finite.any() else 0)
-        corners = np.array(np.meshgrid([lower_bounds[1], upper_bounds[1]], [lower_bounds[2], upper_bounds[2]],
-                                        corner_alts, indexing='ij')).reshape(3, -1)
-        corners_xyz = np.array(tpcs.fromECEF(*geosys.toECEF(*corners)))
-        bounds_xyz = (np.concatenate([[lower_bounds[0]], corners_xyz.min(axis=1)]),
-                      np.concatenate([[upper_bounds[0]], corners_xyz.max(axis=1)]))
-        bounds_xyz[0][3], bounds_xyz[1][3] = np.where(alt_finite, [bounds_xyz[0][3], bounds_xyz[1][3]], alt_pair)
-        if bounds[0][1] == bounds[1][1] and bounds[0][2] == bounds[1][2] and bounds[0][3] == bounds[1][3]:
-            # if the flash location is fixed, use the analytic solution for q
-            ret_q = monopole_q_analytic(bounds_xyz[0][1], bounds_xyz[0][2], bounds_xyz[0][3], stroke_obs, station_xyz)
-            ret_xyz = np.array([bounds_xyz[0][1], bounds_xyz[0][2], bounds_xyz[0][3]])
-            ret_lon, ret_lat, ret_alt = geosys.fromECEF(*tpcs.toECEF(ret_xyz[0], ret_xyz[1], ret_xyz[2]))
-            return ret_lon, ret_lat, ret_alt, ret_q
-        initial_guess = np.array([initial_guess_q, *corners_xyz.mean(axis=1)]) # initial guess at the center of the bounds
-        if not np.isfinite(initial_guess[3]):
-            initial_guess[3] += 1000 # if the altitude bounds are infinite, set it to 1km above the lowest station
-    else:
-        bounds_xyz = None
-        station_largest_ob_idx = np.argmax(np.abs(stroke_obs))
-        initial_guess = np.array([initial_guess_q, *station_xyz[:, station_largest_ob_idx]]) + [0, 0, 0, 1000] # initial guess 1km above the station with the largest observation
-    retrieved_opt = monopole_charge_retrieval(*initial_guess, stroke_obs, station_xyz, bounds=bounds_xyz)
+        q_bounds = (lower_bounds[0], upper_bounds[0]) if lower_bounds[0] is not None and upper_bounds[0] is not None else (-np.inf, np.inf)
+        lon_bounds = (lower_bounds[1], upper_bounds[1])
+        lat_bounds = (lower_bounds[2], upper_bounds[2])
+        alt_bounds = (lower_bounds[3], upper_bounds[3]) 
+        if np.any(np.array([lon_bounds, lat_bounds, alt_bounds]) == None):
+            x_bounds = (-np.inf, np.inf)
+            y_bounds = (-np.inf, np.inf)
+            z_bounds = (station_xyz[2].min(), np.inf)
+        else:
+            corners_lla = np.meshgrid([lon_bounds[0], lon_bounds[1]], [lat_bounds[0], lat_bounds[1]], [alt_bounds[0], alt_bounds[1]], indexing='ij')
+            corners_lla = np.array(corners_lla).reshape(3, -1)
+            corners_ecef = geosys.toECEF(*corners_lla)
+            corners_xyz = np.array(tpcs.fromECEF(*corners_ecef))
+            x_bounds = (corners_xyz[0].min(), corners_xyz[0].max())
+            y_bounds = (corners_xyz[1].min(), corners_xyz[1].max())
+            z_bounds = (corners_xyz[2].min(), corners_xyz[2].max())
+            initial_guess[1:] = corners_xyz.mean(axis=1) # center of the bounding box
+        if np.all(np.isfinite(q_bounds)):
+            initial_guess[0] = np.mean(q_bounds)
+        bounds_qxyz = tuple(np.array([q_bounds, x_bounds, y_bounds, z_bounds], dtype=float).T)
+        if np.all(bounds_qxyz[0][1:] == bounds_qxyz[1][1:]):
+            # if the x, y, z bounds are all equal, then analytically solve for the charge
+            retrieved_q = monopole_q_analytic(*initial_guess[1:], stroke_obs, station_xyz)
+            return lon_bounds[0], lat_bounds[0], alt_bounds[0], retrieved_q
+    retrieved_opt = monopole_charge_retrieval(*initial_guess, stroke_obs, station_xyz, bounds=bounds_qxyz)
     retrieved_q = retrieved_opt[0]
     retrieved_xyz = retrieved_opt[1:]
     retrieved_lon, retrieved_lat, retrieved_alt = geosys.fromECEF(*tpcs.toECEF(retrieved_xyz[0], retrieved_xyz[1], retrieved_xyz[2]))
