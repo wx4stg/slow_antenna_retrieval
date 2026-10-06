@@ -164,7 +164,8 @@ def monopole_q_analytic(x, y, z, stroke_obs, station_xyz):
     return q
 
 
-def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None):
+
+def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None, initial_guess_q=1.0):
     """
     Retrieve the location and charge removed by a monopole discharge stroke using geographic coordinates.
 
@@ -199,27 +200,26 @@ def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None):
         lower_bounds, upper_bounds = bounds
         alt_pair = np.array([lower_bounds[3], upper_bounds[3]], dtype=float)
         alt_finite = np.isfinite(alt_pair)
+        corner_alts = np.where(alt_finite, alt_pair, alt_pair[alt_finite].min() if alt_finite.any() else 0)
         corners = np.array(np.meshgrid([lower_bounds[1], upper_bounds[1]], [lower_bounds[2], upper_bounds[2]],
-                                        np.where(alt_finite, alt_pair, 0), indexing='ij')).reshape(3, -1)
+                                        corner_alts, indexing='ij')).reshape(3, -1)
         corners_xyz = np.array(tpcs.fromECEF(*geosys.toECEF(*corners)))
         bounds_xyz = (np.concatenate([[lower_bounds[0]], corners_xyz.min(axis=1)]),
                       np.concatenate([[upper_bounds[0]], corners_xyz.max(axis=1)]))
         bounds_xyz[0][3], bounds_xyz[1][3] = np.where(alt_finite, [bounds_xyz[0][3], bounds_xyz[1][3]], alt_pair)
-    else:
-        bounds_xyz = None
-    initial_guess_q = 1
-    station_largest_ob_idx = np.argmax(np.abs(stroke_obs))
-    if bounds is not None:
         if bounds[0][1] == bounds[1][1] and bounds[0][2] == bounds[1][2] and bounds[0][3] == bounds[1][3]:
             # if the flash location is fixed, use the analytic solution for q
             ret_q = monopole_q_analytic(bounds_xyz[0][1], bounds_xyz[0][2], bounds_xyz[0][3], stroke_obs, station_xyz)
             ret_xyz = np.array([bounds_xyz[0][1], bounds_xyz[0][2], bounds_xyz[0][3]])
             ret_lon, ret_lat, ret_alt = geosys.fromECEF(*tpcs.toECEF(ret_xyz[0], ret_xyz[1], ret_xyz[2]))
             return ret_lon, ret_lat, ret_alt, ret_q
-    initial_guess = np.array([initial_guess_q, *station_xyz[:, station_largest_ob_idx]]) + [0, 0, 0, 1000] # initial guess 1km above the station with the largest observation
-    if bounds_xyz is not None:
-        margin = np.array([1e-3, 1, 1, 1])
-        initial_guess = np.clip(initial_guess, bounds_xyz[0] + margin, bounds_xyz[1] - margin) # make sure initial guess is within bounds and not on the boundary
+        initial_guess = np.array([initial_guess_q, *corners_xyz.mean(axis=1)]) # initial guess at the center of the bounds
+        if not np.isfinite(initial_guess[3]):
+            initial_guess[3] += 1000 # if the altitude bounds are infinite, set it to 1km above the lowest station
+    else:
+        bounds_xyz = None
+        station_largest_ob_idx = np.argmax(np.abs(stroke_obs))
+        initial_guess = np.array([initial_guess_q, *station_xyz[:, station_largest_ob_idx]]) + [0, 0, 0, 1000] # initial guess 1km above the station with the largest observation
     retrieved_opt = monopole_charge_retrieval(*initial_guess, stroke_obs, station_xyz, bounds=bounds_xyz)
     retrieved_q = retrieved_opt[0]
     retrieved_xyz = retrieved_opt[1:]
