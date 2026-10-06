@@ -194,14 +194,17 @@ def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None):
     tpcs = coords.TangentPlaneCartesianSystem(ctrLat=station_df['lat'].mean(), ctrLon=station_df['lon'].mean(), ctrAlt=station_df['alt'].min())
     geosys = coords.GeographicSystem()
     station_ECEF = geosys.toECEF(station_lon, station_lat, station_alt)
-    station_xyz = tpcs.fromECEF(*station_ECEF)
+    station_xyz = np.array(tpcs.fromECEF(*station_ECEF))
     if bounds is not None:
         lower_bounds, upper_bounds = bounds
-        q_bounds = (lower_bounds[0], upper_bounds[0])
-        upper_bounds_xyz = tpcs.fromECEF(*geosys.toECEF(upper_bounds[1], upper_bounds[2], upper_bounds[3]))
-        lower_bounds_xyz = tpcs.fromECEF(*geosys.toECEF(lower_bounds[1], lower_bounds[2], lower_bounds[3]))
-        bounds_xyz = (np.array([q_bounds[0], lower_bounds_xyz[0], lower_bounds_xyz[1], lower_bounds_xyz[2]]),
-                      np.array([q_bounds[1], upper_bounds_xyz[0], upper_bounds_xyz[1], upper_bounds_xyz[2]]))
+        alt_pair = np.array([lower_bounds[3], upper_bounds[3]], dtype=float)
+        alt_finite = np.isfinite(alt_pair)
+        corners = np.array(np.meshgrid([lower_bounds[1], upper_bounds[1]], [lower_bounds[2], upper_bounds[2]],
+                                        np.where(alt_finite, alt_pair, 0), indexing='ij')).reshape(3, -1)
+        corners_xyz = np.array(tpcs.fromECEF(*geosys.toECEF(*corners)))
+        bounds_xyz = (np.concatenate([[lower_bounds[0]], corners_xyz.min(axis=1)]),
+                      np.concatenate([[upper_bounds[0]], corners_xyz.max(axis=1)]))
+        bounds_xyz[0][3], bounds_xyz[1][3] = np.where(alt_finite, [bounds_xyz[0][3], bounds_xyz[1][3]], alt_pair)
     else:
         bounds_xyz = None
     initial_guess_q = 1
@@ -213,8 +216,11 @@ def monopole_retrieval_geographic(stroke_obs, station_df, bounds=None):
             ret_xyz = np.array([bounds_xyz[0][1], bounds_xyz[0][2], bounds_xyz[0][3]])
             ret_lon, ret_lat, ret_alt = geosys.fromECEF(*tpcs.toECEF(ret_xyz[0], ret_xyz[1], ret_xyz[2]))
             return ret_lon, ret_lat, ret_alt, ret_q
-    initial_guess_xyz = station_xyz[:, station_largest_ob_idx]
-    retrieved_opt = monopole_charge_retrieval(initial_guess_q, initial_guess_xyz[0], initial_guess_xyz[1], initial_guess_xyz[2] + 1000, stroke_obs, station_xyz, bounds=bounds_xyz)
+    initial_guess = np.array([initial_guess_q, *station_xyz[:, station_largest_ob_idx]]) + [0, 0, 0, 1000] # initial guess 1km above the station with the largest observation
+    if bounds_xyz is not None:
+        margin = np.array([1e-3, 1, 1, 1])
+        initial_guess = np.clip(initial_guess, bounds_xyz[0] + margin, bounds_xyz[1] - margin) # make sure initial guess is within bounds and not on the boundary
+    retrieved_opt = monopole_charge_retrieval(*initial_guess, stroke_obs, station_xyz, bounds=bounds_xyz)
     retrieved_q = retrieved_opt[0]
     retrieved_xyz = retrieved_opt[1:]
     retrieved_lon, retrieved_lat, retrieved_alt = geosys.fromECEF(*tpcs.toECEF(retrieved_xyz[0], retrieved_xyz[1], retrieved_xyz[2]))
